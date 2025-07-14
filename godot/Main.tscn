@@ -1,0 +1,42 @@
+[gd_scene format=3 uid="uid://icdk517r7vtl"]
+
+[node name="Node2D" type="Game"]
+width = 10
+height = 10
+step_mode = true
+
+[node name="VBoxContainer" type="VBoxContainer" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="HBoxContainer" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="Desc" type="Label" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+text = "按下T键切换单步执行模式，按下Space键执行进行单步执行。"
+
+[node name="StepModeLabel" type="Label" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+text = "当前单步执行模式："
+
+[node name="StepMode" type="Label" parent="VBoxContainer/HBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="SeedLabel" type="Label" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+text = "当前随机种子："
+
+[node name="Seed" type="Label" parent="VBoxContainer/HBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="GridContainer" type="GridContainer" parent="VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+columns = 22

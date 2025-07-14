@@ -1,0 +1,29 @@
+[package]
+name = "a-star"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = { version = "0.3.2", features = [] }
+tokio = { version = "1.46.1", features = ["full"] }
+godot_tokio = "0.3.1"
+godot-bevy = "0.7.0"
+
+[features]
+godot-bevy = []
+
+[profile.release]
+# 使用静态链接减少依赖
+lto = true
+codegen-units = 1
+
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/SUBSYSTEM:WINDOWS"
+]
+
