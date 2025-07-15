@@ -2,16 +2,16 @@ use crate::block::Block;
 use godot::classes::*;
 use godot::global::{Key, MouseButton};
 use godot::prelude::*;
+use godot_tokio::AsyncRuntime;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::DerefMut;
 use std::time::Duration;
-use godot_tokio::AsyncRuntime;
 use tokio::sync::broadcast::{Receiver, Sender, channel};
 use tokio::time::sleep;
 
 // Node structure for A* algorithm
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct Node {
     position: (i32, i32),
     f_score: i32, // f = g + h
@@ -53,6 +53,9 @@ struct AStarController {
     width: i32,
     height: i32,
     blocks: Vec<Vec<Gd<Block>>>,
+    open_set: BinaryHeap<Node>,
+    closed_set: HashSet<(i32, i32)>,
+    came_from: HashMap<(i32, i32), Node>,
 
     start_block: Option<(i32, i32)>,
     end_block: Option<(i32, i32)>,
@@ -64,6 +67,9 @@ impl Default for AStarController {
             width: 0,
             height: 0,
             blocks: vec![],
+            open_set: Default::default(),
+            closed_set: Default::default(),
+            came_from: Default::default(),
             start_block: None,
             end_block: None,
         }
@@ -97,13 +103,15 @@ impl ICanvasLayer for Game {
     fn ready(&mut self) {
         self.controller.width = self.width;
         self.controller.height = self.height;
-        self.step_mode_label.set_text(self.step_mode.to_string().as_str());
+        self.step_mode_label
+            .set_text(self.step_mode.to_string().as_str());
 
         let block_prefab = load::<PackedScene>("res://Block.tscn");
         let mut container = self.base().get_node_as::<GridContainer>("%GridContainer");
         let mut rng = RandomNumberGenerator::new_gd();
-        rng.randomize();
-        self.seed_label.set_text(rng.get_seed().to_string().as_str());
+        rng.set_seed(6466529302137445490);
+        self.seed_label
+            .set_text(rng.get_seed().to_string().as_str());
 
         container.set_columns(self.width);
         self.controller.blocks = vec![vec![]; self.width as usize];
@@ -153,7 +161,8 @@ impl ICanvasLayer for Game {
             if let Ok(key_event) = key_event {
                 if key_event.is_pressed() && key_event.get_keycode() == Key::T {
                     self.step_mode ^= true;
-                    self.step_mode_label.set_text(self.step_mode.to_string().as_str());
+                    self.step_mode_label
+                        .set_text(self.step_mode.to_string().as_str());
                     godot_print!("Toggle step mode: {}", self.step_mode);
                 }
             }
@@ -263,15 +272,11 @@ impl AStarController {
         godot_print!("Calculating path from {:?} to {:?}", start_pos, end_pos);
 
         // Initialize open and closed sets
-        let mut open_set = BinaryHeap::new();
-        let mut closed_set = HashSet::new();
+        self.open_set = BinaryHeap::new();
+        self.closed_set = HashSet::new();
 
         // Initialize came_from map to reconstruct the path
-        let mut came_from = HashMap::new();
-
-        // Initialize g_scores map (cost from start to current node)
-        let mut g_scores = HashMap::new();
-        g_scores.insert(start_pos, 0);
+        self.came_from = HashMap::new();
 
         // Add start node to open set
         let h_score = Self::manhattan_distance(start_pos, end_pos);
@@ -282,12 +287,12 @@ impl AStarController {
             f_score,
             h_score
         );
-        open_set.push(Node::new(start_pos, 0, h_score));
+        self.open_set.push(Node::new(start_pos, 0, h_score));
 
         let mut last_block: Option<Gd<Block>> = None;
 
         // Main A* loop
-        while let Some(current) = open_set.pop() {
+        while let Some(current) = self.open_set.pop() {
             if let Some(ref mut rx) = rx {
                 rx.recv().await.unwrap();
             }
@@ -305,12 +310,12 @@ impl AStarController {
             if current_pos == end_pos {
                 godot_print!("Reached end position {:?}! Path found!", end_pos);
                 godot_print!("A* algorithm finished successfully");
-                self.reconstruct_path(&came_from, end_pos);
+                self.reconstruct_path();
                 return;
             }
 
             // Skip if already in closed set
-            if closed_set.contains(&current_pos) {
+            if self.closed_set.contains(&current_pos) {
                 godot_print!(
                     "Node at position {:?} is already in closed set, skipping",
                     current_pos
@@ -319,7 +324,7 @@ impl AStarController {
             }
 
             // Add to closed set and visualize
-            closed_set.insert(current_pos);
+            self.closed_set.insert(current_pos);
             godot_print!("Added node at position {:?} to closed set", current_pos);
 
             // Don't color start and end blocks
@@ -341,9 +346,6 @@ impl AStarController {
                 last_block = cur_block;
             }
 
-            // Store the current f_score for finding nodes with the same f_score
-            let current_f_score = current.f_score;
-
             // Check all neighbors
             let neighbors = self.get_neighbors(current_pos);
             godot_print!(
@@ -356,7 +358,7 @@ impl AStarController {
                 godot_print!("Processing neighbor at position {:?}", neighbor_pos);
 
                 // Skip if in closed set
-                if closed_set.contains(&neighbor_pos) {
+                if self.closed_set.contains(&neighbor_pos) {
                     godot_print!(
                         "Neighbor at position {:?} is already in closed set, skipping",
                         neighbor_pos
@@ -364,204 +366,56 @@ impl AStarController {
                     continue;
                 }
 
-                // Calculate tentative g_score
-                let tentative_g_score = *g_scores.get(&current_pos).unwrap_or(&i32::MAX);
-                let previous_g_score = *g_scores.get(&neighbor_pos).unwrap_or(&i32::MAX);
+                // Calculate h_score
+                let h_score = Self::manhattan_distance(neighbor_pos, end_pos);
+                let g_score = current.g_score + 1;
+                let f_score = h_score + g_score;
 
                 godot_print!(
-                    "Neighbor at position {:?}: tentative g_score={}, previous g_score={}",
+                    "Adding node at position {:?} to open set with f_score={}, g_score={}, h_score={}",
                     neighbor_pos,
-                    tentative_g_score,
-                    previous_g_score
+                    f_score,
+                    g_score,
+                    h_score
                 );
 
-                // If this path is better than any previous one, update
-                if tentative_g_score < previous_g_score {
-                    godot_print!(
-                        "Found better path to neighbor at position {:?}",
-                        neighbor_pos
-                    );
-                    // Update came_from map
-                    came_from.insert(neighbor_pos, current_pos);
-
-                    // Update g_score
-                    g_scores.insert(neighbor_pos, tentative_g_score);
-
-                    // Calculate h_score
-                    let h_score = Self::manhattan_distance(neighbor_pos, end_pos);
-                    let f_score = tentative_g_score + h_score;
-
-                    godot_print!(
-                        "Adding node at position {:?} to open set with f_score={}, g_score={}, h_score={}",
-                        neighbor_pos,
-                        f_score,
-                        tentative_g_score,
-                        h_score
-                    );
-
-                    // Add to open set
-                    open_set.push(Node::new(neighbor_pos, tentative_g_score, h_score));
-
-                    // Visualize open set (but don't color start and end blocks)
-                    if neighbor_pos != start_pos && neighbor_pos != end_pos {
-                        if let Some(mut block) = self.get_block(neighbor_pos.0, neighbor_pos.1) {
-                            // Update block's f, g, h values
-                            block.bind_mut().set_f(tentative_g_score + h_score);
-                            block.bind_mut().set_g(tentative_g_score);
-                            block.bind_mut().set_h(h_score);
-
-                            // Only color if not already in closed set (which would be colored differently)
-                            if !closed_set.contains(&neighbor_pos) {
-                                block.bind_mut().set_color(Game::OPEN_BLOCK_COLOR);
-                            }
+                // Update came_from map
+                // if let Some(old) = self.came_from.get(&neighbor_pos) {
+                //     if current.g_score < old.g_score {
+                //         self.came_from.insert(neighbor_pos, current);
+                //     }
+                // } else {
+                //     self.came_from.insert(neighbor_pos, current);
+                // }
+                self.came_from
+                    .entry(neighbor_pos)
+                    .and_modify(|x| {
+                        if current.g_score < x.g_score {
+                            *x = current;
                         }
-                    }
-                }
-            }
-
-            // Extract and process all nodes with the same f_score as the current node
-            let mut same_f_score_nodes = Vec::new();
-
-            // Use BinaryHeap::peek to look at the next node without removing it
-            while let Some(next_node) = open_set.peek() {
-                if next_node.f_score == current_f_score {
-                    // If it has the same f_score, pop it and add to our list
-                    let node = open_set.pop().unwrap();
-                    same_f_score_nodes.push(node);
-                } else {
-                    // If it has a different f_score, stop
-                    break;
-                }
-            }
-
-            godot_print!(
-                "Found {} additional nodes with the same f_score={}",
-                same_f_score_nodes.len(),
-                current_f_score
-            );
-
-            // Process all nodes with the same f_score
-            for node in same_f_score_nodes {
-                let node_pos = node.position;
-
+                    })
+                    .or_insert(current);
                 godot_print!(
-                    "Processing additional node at position {:?} with f_score={}, g_score={}, h_score={}",
-                    node_pos,
-                    node.f_score,
-                    node.g_score,
-                    node.h_score
+                    "Node ({}, {}) <- {:?}",
+                    neighbor_pos.0,
+                    neighbor_pos.1,
+                    current_pos
                 );
+                // Add to open set
+                self.open_set
+                    .push(Node::new(neighbor_pos, g_score, h_score));
 
-                // Skip if already in closed set
-                if closed_set.contains(&node_pos) {
-                    godot_print!(
-                        "Additional node at position {:?} is already in closed set, skipping",
-                        node_pos
-                    );
-                    continue;
-                }
-
-                // If we reached the end, reconstruct and return the path
-                if node_pos == end_pos {
-                    godot_print!("Reached end position {:?} with additional node! Path found!", end_pos);
-                    godot_print!("A* algorithm finished successfully");
-
-                    // Update came_from to ensure we can reconstruct the path
-                    came_from.insert(node_pos, current_pos);
-                    g_scores.insert(node_pos, node.g_score);
-
-                    self.reconstruct_path(&came_from, end_pos);
-                    return;
-                }
-
-                // Add to closed set and visualize
-                closed_set.insert(node_pos);
-                godot_print!("Added additional node at position {:?} to closed set", node_pos);
-
-                // Don't color start and end blocks
-                if node_pos != start_pos && node_pos != end_pos {
-                    if let Some(mut block) = self.get_block(node_pos.0, node_pos.1) {
+                // Visualize open set (but don't color start and end blocks)
+                if neighbor_pos != start_pos && neighbor_pos != end_pos {
+                    if let Some(mut block) = self.get_block(neighbor_pos.0, neighbor_pos.1) {
                         // Update block's f, g, h values
-                        block.bind_mut().set_f(node.f_score);
-                        block.bind_mut().set_g(node.g_score);
-                        block.bind_mut().set_h(node.h_score);
+                        block.bind_mut().set_f(f_score);
+                        block.bind_mut().set_g(g_score);
+                        block.bind_mut().set_h(h_score);
 
-                        // Color as closed (processed) block
-                        block.bind_mut().set_color(Game::CLOSED_BLOCK_COLOR);
-                    }
-                }
-
-                // Process neighbors of this node too
-                let node_neighbors = self.get_neighbors(node_pos);
-                godot_print!(
-                    "Found {} neighbors for additional node at position {:?}",
-                    node_neighbors.len(),
-                    node_pos
-                );
-
-                for neighbor_pos in node_neighbors {
-                    godot_print!("Processing neighbor at position {:?} of additional node", neighbor_pos);
-
-                    // Skip if in closed set
-                    if closed_set.contains(&neighbor_pos) {
-                        godot_print!(
-                            "Neighbor at position {:?} is already in closed set, skipping",
-                            neighbor_pos
-                        );
-                        continue;
-                    }
-
-                    // Calculate tentative g_score
-                    let tentative_g_score = *g_scores.get(&node_pos).unwrap_or(&i32::MAX);
-                    let previous_g_score = *g_scores.get(&neighbor_pos).unwrap_or(&i32::MAX);
-
-                    godot_print!(
-                        "Neighbor at position {:?}: tentative g_score={}, previous g_score={}",
-                        neighbor_pos,
-                        tentative_g_score,
-                        previous_g_score
-                    );
-
-                    // If this path is better than any previous one, update
-                    if tentative_g_score < previous_g_score {
-                        godot_print!(
-                            "Found better path to neighbor at position {:?}",
-                            neighbor_pos
-                        );
-                        // Update came_from map
-                        came_from.insert(neighbor_pos, node_pos);
-
-                        // Update g_score
-                        g_scores.insert(neighbor_pos, tentative_g_score);
-
-                        // Calculate h_score
-                        let h_score = Self::manhattan_distance(neighbor_pos, end_pos);
-                        let f_score = tentative_g_score + h_score;
-
-                        godot_print!(
-                            "Adding node at position {:?} to open set with f_score={}, g_score={}, h_score={}",
-                            neighbor_pos,
-                            f_score,
-                            tentative_g_score,
-                            h_score
-                        );
-
-                        // Add to open set
-                        open_set.push(Node::new(neighbor_pos, tentative_g_score, h_score));
-
-                        // Visualize open set (but don't color start and end blocks)
-                        if neighbor_pos != start_pos && neighbor_pos != end_pos {
-                            if let Some(mut block) = self.get_block(neighbor_pos.0, neighbor_pos.1) {
-                                // Update block's f, g, h values
-                                block.bind_mut().set_f(tentative_g_score + h_score);
-                                block.bind_mut().set_g(tentative_g_score);
-                                block.bind_mut().set_h(h_score);
-
-                                // Only color if not already in closed set (which would be colored differently)
-                                if !closed_set.contains(&neighbor_pos) {
-                                    block.bind_mut().set_color(Game::OPEN_BLOCK_COLOR);
-                                }
-                            }
+                        // Only color if not already in closed set (which would be colored differently)
+                        if !self.closed_set.contains(&neighbor_pos) {
+                            block.bind_mut().set_color(Game::OPEN_BLOCK_COLOR);
                         }
                     }
                 }
@@ -577,21 +431,18 @@ impl AStarController {
     }
 
     // Reconstruct the path from came_from map
-    fn reconstruct_path(
-        &mut self,
-        came_from: &HashMap<(i32, i32), (i32, i32)>,
-        end_pos: (i32, i32),
-    ) {
+    fn reconstruct_path(&mut self) {
+        let end_pos = self.end_block.unwrap();
         godot_print!("Reconstructing path from end position {:?}", end_pos);
 
         let mut current = end_pos;
         let mut path = Vec::new();
 
         // Reconstruct the path by following came_from map
-        while let Some(&prev) = came_from.get(&current) {
+        while let Some(&prev) = self.came_from.get(&current) {
             path.push(current);
             godot_print!("Path node: {:?} <- {:?}", current, prev);
-            current = prev;
+            current = prev.position;
 
             // Stop if we reached the start
             if current == self.start_block.unwrap() {
@@ -667,9 +518,12 @@ impl Game {
             let mut game = self.to_gd();
             godot::task::spawn(async move {
                 ctr.calculate_path(rx).await;
-                AsyncRuntime::runtime().spawn(async {
-                    sleep(Duration::from_millis(100)).await;
-                }).await.unwrap();
+                AsyncRuntime::runtime()
+                    .spawn(async {
+                        sleep(Duration::from_millis(100)).await;
+                    })
+                    .await
+                    .unwrap();
                 game.bind_mut().is_processing = false;
                 game.bind_mut().tx = None;
             });
